@@ -315,7 +315,7 @@ flowchart TD
     F --> G[Read /etc/passwd\nand .bashrc via php://filter]
     G --> H[Credentials saket / Saket!#$%@!!]
     H --> I[Login to Tornado app\nport 9999]
-    I --> J[SSTI confirmed\nname={{7*7}}]
+    I --> J["SSTI confirmed\nname={{7*7}}"]
     J --> K[Reverse shell\nvia os.system SSTI]
     K --> L[Shell as saket]
     L --> M[SUID pkexec 0.105\nvulnerable to CVE-2021-3560]
